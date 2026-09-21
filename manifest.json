@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-onenote-sync",
+  "name": "OneNote Vault Sync",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "High-speed incremental OneNote to Obsidian synchronizer using native Windows OneNote COM automation.",
+  "author": "Finn",
+  "isDesktopOnly": true
+}

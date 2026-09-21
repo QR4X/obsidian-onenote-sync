@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-onenote-sync",
+  "version": "1.0.0",
+  "description": "High-performance incremental OneNote to Obsidian synchronizer using native Windows OneNote COM automation.",
+  "main": "main.js",
+  "scripts": {},
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "onenote",
+    "sync",
+    "markdown"
+  ],
+  "author": "Finn",
+  "license": "MIT"
+}

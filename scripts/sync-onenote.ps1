@@ -4,7 +4,8 @@ param(
   [string]$Section,
   [switch]$Force,
   [switch]$List,
-  [switch]$CleanDuplicates
+  [switch]$CleanDuplicates,
+  [switch]$WithCanvas
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,7 +102,8 @@ function Convert-PageXmlToMarkdown {
     [string]$BaseFileName,
     [string]$NotebookName,
     [string]$SectionName,
-    [string]$TargetFolder
+    [string]$TargetFolder,
+    [switch]$CreateCanvas
   )
 
   $cleanImgBase = ($BaseFileName -replace '\s+', '_')
@@ -144,7 +146,7 @@ function Convert-PageXmlToMarkdown {
 
   $lines.Add("> [!info] Importierter OneNote-Inhalt")
   $metaLine = "> Notizbuch: $NotebookName | Abschnitt: $SectionName"
-  if ($hasSpatial) {
+  if ($CreateCanvas -and $hasSpatial) {
     $metaLine += " | Canvas-Ansicht: [[$canvasFileName]]"
   }
   $lines.Add($metaLine)
@@ -305,7 +307,7 @@ function Convert-PageXmlToMarkdown {
     }
   }
 
-  if ($hasSpatial -and $canvasFilePath -and $canvasNodes.Count -gt 1) {
+  if ($CreateCanvas -and $hasSpatial -and $canvasFilePath -and $canvasNodes.Count -gt 1) {
     $canvasObj = [ordered]@{
       nodes = $canvasNodes
       edges = $canvasEdges
@@ -479,7 +481,8 @@ foreach ($item in $toSync) {
 
     $mdContent = Convert-PageXmlToMarkdown -PageDoc $pdoc -NsManager $pns `
       -TargetAssetsDir $assetsDir -BaseFileName (Get-SafeFileName $page.name) `
-      -NotebookName $nbName -SectionName $secName -TargetFolder $targetFolder
+      -NotebookName $nbName -SectionName $secName -TargetFolder $targetFolder `
+      -CreateCanvas:$WithCanvas
 
     [System.IO.File]::WriteAllText($item.AbsolutePath, $mdContent, [System.Text.UTF8Encoding]::new($false))
 

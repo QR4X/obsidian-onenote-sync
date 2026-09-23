@@ -3,7 +3,8 @@ param(
   [string]$Notebook,
   [string]$Section,
   [switch]$Force,
-  [switch]$List
+  [switch]$List,
+  [switch]$CleanDuplicates
 )
 
 $ErrorActionPreference = "Stop"
@@ -247,6 +248,36 @@ if ($List) {
   exit 0
 }
 
+if ($CleanDuplicates) {
+  Write-Host "Pruefe auf alte Exporter-Duplikate (* (1).md, etc.)..."
+  $duplicateFiles = Get-ChildItem -LiteralPath $output -Recurse -Filter '* (*).md' -File
+  $removedDups = 0
+  foreach ($f in $duplicateFiles) {
+    $baseName = $f.Name -replace '\s*\(\d+\)\.md$', '.md'
+    $basePath = Join-Path $f.DirectoryName $baseName
+    if (Test-Path -LiteralPath $basePath) {
+      Remove-Item -LiteralPath $f.FullName -Force
+      $removedDups++
+    }
+  }
+  Write-Host "Bereinigung abgeschlossen: $removedDups Duplikat-Datei(en) entfernt."
+}
+
+# Manifest auf existierende OneNote-Seiten bereinigen
+$allPageIdSet = @{}
+foreach ($p in $allPageNodes) {
+  $allPageIdSet[$p.ID] = $true
+}
+$toPrune = @()
+foreach ($k in $manifest.Keys) {
+  if (-not $allPageIdSet.ContainsKey($k)) {
+    $toPrune += $k
+  }
+}
+foreach ($k in $toPrune) {
+  $manifest.Remove($k)
+}
+
 $toSync = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 foreach ($page in $filteredPages) {
@@ -331,6 +362,17 @@ foreach ($item in $toSync) {
       -NotebookName $nbName -SectionName $secName -TargetFolder $targetFolder
 
     [System.IO.File]::WriteAllText($item.AbsolutePath, $mdContent, [System.Text.UTF8Encoding]::new($false))
+
+    # Falls die Seite zuvor an einem anderen Pfad lag (umbenannt/verschoben), alte Datei loeschen
+    if ($manifest.Contains($page.ID)) {
+      $oldRel = $manifest[$page.ID].path
+      if ($oldRel -and $oldRel -ne $item.RelPath) {
+        $oldFull = Join-Path $output $oldRel
+        if (Test-Path -LiteralPath $oldFull) {
+          Remove-Item -LiteralPath $oldFull -Force
+        }
+      }
+    }
 
     $manifest[$page.ID] = [ordered]@{
       lastModifiedTime = $page.lastModifiedTime

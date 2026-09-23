@@ -87,6 +87,12 @@ function Clean-HtmlText([string]$html) {
   return $s.Trim()
 }
 
+function New-HexId {
+  $bytes = New-Object byte[] 8
+  [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+  return [System.BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
+}
+
 function Convert-PageXmlToMarkdown {
   param(
     [xml]$PageDoc,
@@ -98,100 +104,214 @@ function Convert-PageXmlToMarkdown {
     [string]$TargetFolder
   )
 
+  $cleanImgBase = ($BaseFileName -replace '\s+', '_')
   $title = $PageDoc.DocumentElement.name
   $lines = [System.Collections.Generic.List[string]]::new()
   $lines.Add("# $title")
   $lines.Add("")
-  $lines.Add("> [!info] Importierter OneNote-Inhalt")
-  $lines.Add("> Notizbuch: $NotebookName | Abschnitt: $SectionName")
-  $lines.Add("")
+
+  $canvasNodes = [System.Collections.Generic.List[PSCustomObject]]::new()
+  $canvasEdges = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+  # Alle visuellen Inhaltselemente sammeln
+  $childElements = @()
+  foreach ($child in $PageDoc.DocumentElement.ChildNodes) {
+    if ($child.LocalName -in @("Outline", "Image", "InsertedFile")) {
+      $pos = $child.SelectSingleNode("one:Position", $NsManager)
+      $size = $child.SelectSingleNode("one:Size", $NsManager)
+      $x = if ($pos -and $pos.x) { [double]$pos.x } else { 0.0 }
+      $y = if ($pos -and $pos.y) { [double]$pos.y } else { 0.0 }
+      $w = if ($size -and $size.width) { [double]$size.width } else { 400.0 }
+      $h = if ($size -and $size.height) { [double]$size.height } else { 250.0 }
+      $childElements += [PSCustomObject]@{
+        Node = $child
+        Tag = $child.LocalName
+        x = $x
+        y = $y
+        w = $w
+        h = $h
+      }
+    }
+  }
+
+  $sortedElements = $childElements | Sort-Object y, x
 
   $imgIndex = 0
+  $hasSpatial = ($childElements.Count -gt 1)
 
-  foreach ($outline in $PageDoc.SelectNodes("//one:Outline", $NsManager)) {
-    $tables = $outline.SelectNodes(".//one:Table", $NsManager)
-    if ($tables -and $tables.Count -gt 0) {
-      foreach ($table in $tables) {
-        $isFirst = $true
-        foreach ($row in $table.SelectNodes("one:Row", $NsManager)) {
-          $cells = foreach ($cell in $row.SelectNodes("one:Cell", $NsManager)) {
-            $texts = foreach ($t in $cell.SelectNodes(".//one:T", $NsManager)) {
-              Clean-HtmlText $t.InnerText
-            }
-            (($texts | Where-Object { $_ }) -join " ") -replace "\|", "&#124;"
-          }
-          $lines.Add("| " + ($cells -join " | ") + " |")
-          if ($isFirst) {
-            $seps = foreach ($c in $cells) { "---" }
-            $lines.Add("| " + ($seps -join " | ") + " |")
-            $isFirst = $false
-          }
-        }
-        $lines.Add("")
-      }
-    }
+  $canvasFileName = "$BaseFileName.canvas"
+  $canvasFilePath = if ($TargetFolder) { Join-Path $TargetFolder $canvasFileName } else { "" }
 
-    foreach ($oe in $outline.SelectNodes(".//one:OE", $NsManager)) {
-      if ($oe.SelectSingleNode("ancestor::one:Cell", $NsManager)) {
-        continue
-      }
+  $lines.Add("> [!info] Importierter OneNote-Inhalt")
+  $metaLine = "> Notizbuch: $NotebookName | Abschnitt: $SectionName"
+  if ($hasSpatial) {
+    $metaLine += " | Canvas-Ansicht: [[$canvasFileName]]"
+  }
+  $lines.Add($metaLine)
+  $lines.Add("")
 
-      $depth = 0
-      $curr = $oe.ParentNode
-      while ($curr -and $curr.LocalName -ne "Outline") {
-        if ($curr.LocalName -eq "OEChildren") { $depth++ }
-        $curr = $curr.ParentNode
-      }
-      $indent = "  " * [Math]::Max(0, $depth - 1)
+  foreach ($item in $sortedElements) {
+    $elem = $item.Node
+    $tag = $item.Tag
 
-      $listNode = $oe.SelectSingleNode("one:List", $NsManager)
-      $prefix = ""
-      if ($listNode) {
-        if ($listNode.SelectSingleNode("one:Number", $NsManager)) {
-          $prefix = "1. "
-        } else {
-          $prefix = "- "
-        }
-      }
+    if ($tag -eq "Image") {
+      $imgIndex++
+      $dataNode = $elem.SelectSingleNode("one:Data", $NsManager)
+      if ($dataNode -and -not [string]::IsNullOrWhiteSpace($dataNode.InnerText)) {
+        $ext = if ($elem.format) { $elem.format.ToLower() } else { "png" }
+        if ($ext -eq "emf") { $ext = "png" }
+        $imgFileName = "${cleanImgBase}_image_$($imgIndex.ToString('0000')).$ext"
+        $imgPath = Join-Path $TargetAssetsDir $imgFileName
+        try {
+          $bytes = [Convert]::FromBase64String($dataNode.InnerText.Trim())
+          [System.IO.File]::WriteAllBytes($imgPath, $bytes)
 
-      $tNode = $oe.SelectSingleNode("one:T", $NsManager)
-      if ($tNode) {
-        $text = Clean-HtmlText $tNode.InnerText
-        if ($text -and $text -ne $title) {
-          if ($prefix) {
-            $lines.Add("$indent$prefix$text")
+          $relPath = if ($TargetFolder -and (Test-Path -LiteralPath $TargetFolder)) {
+            $fromUri = [System.Uri]((Resolve-Path -LiteralPath $TargetFolder).Path + "\")
+            $toUri = [System.Uri]$imgPath
+            [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString())
           } else {
-            $lines.Add("$indent$text")
+            "../../Assets/$imgFileName"
+          }
+          $lines.Add("![image]($relPath)")
+          $lines.Add("")
+
+          $vaultAssetRel = "OneNote/Assets/$imgFileName"
+          $canvasNodes.Add([ordered]@{
+            id = (New-HexId)
+            type = "file"
+            file = $vaultAssetRel
+            x = [int][Math]::Round($item.x)
+            y = [int][Math]::Round($item.y)
+            width = [int][Math]::Max(100, [Math]::Round($item.w))
+            height = [int][Math]::Max(100, [Math]::Round($item.h))
+          })
+        } catch {}
+      }
+    } elseif ($tag -eq "Outline") {
+      $outlineLines = [System.Collections.Generic.List[string]]::new()
+      $tables = $elem.SelectNodes(".//one:Table", $NsManager)
+      if ($tables -and $tables.Count -gt 0) {
+        foreach ($table in $tables) {
+          $isFirst = $true
+          foreach ($row in $table.SelectNodes("one:Row", $NsManager)) {
+            $cells = foreach ($cell in $row.SelectNodes("one:Cell", $NsManager)) {
+              $texts = foreach ($t in $cell.SelectNodes(".//one:T", $NsManager)) {
+                Clean-HtmlText $t.InnerText
+              }
+              (($texts | Where-Object { $_ }) -join " ") -replace "\|", "&#124;"
+            }
+            $outlineLines.Add("| " + ($cells -join " | ") + " |")
+            if ($isFirst) {
+              $seps = foreach ($c in $cells) { "---" }
+              $outlineLines.Add("| " + ($seps -join " | ") + " |")
+              $isFirst = $false
+            }
+          }
+          $outlineLines.Add("")
+        }
+      }
+
+      foreach ($oe in $elem.SelectNodes(".//one:OE", $NsManager)) {
+        if ($oe.SelectSingleNode("ancestor::one:Cell", $NsManager)) {
+          continue
+        }
+
+        $depth = 0
+        $curr = $oe.ParentNode
+        while ($curr -and $curr.LocalName -ne "Outline") {
+          if ($curr.LocalName -eq "OEChildren") { $depth++ }
+          $curr = $curr.ParentNode
+        }
+        $indent = "  " * [Math]::Max(0, $depth - 1)
+
+        $listNode = $oe.SelectSingleNode("one:List", $NsManager)
+        $prefix = ""
+        if ($listNode) {
+          if ($listNode.SelectSingleNode("one:Number", $NsManager)) {
+            $prefix = "1. "
+          } else {
+            $prefix = "- "
+          }
+        }
+
+        $tNode = $oe.SelectSingleNode("one:T", $NsManager)
+        if ($tNode) {
+          $text = Clean-HtmlText $tNode.InnerText
+          if ($text -and $text -ne $title) {
+            if ($prefix) {
+              $outlineLines.Add("$indent$prefix$text")
+            } else {
+              $outlineLines.Add("$indent$text")
+            }
+          }
+        }
+
+        $imgNode = $oe.SelectSingleNode("one:Image", $NsManager)
+        if ($imgNode) {
+          $imgIndex++
+          $dataNode = $imgNode.SelectSingleNode("one:Data", $NsManager)
+          if ($dataNode -and -not [string]::IsNullOrWhiteSpace($dataNode.InnerText)) {
+            $ext = if ($imgNode.format) { $imgNode.format.ToLower() } else { "png" }
+            if ($ext -eq "emf") { $ext = "png" }
+            $imgFileName = "${cleanImgBase}_image_$($imgIndex.ToString('0000')).$ext"
+            $imgPath = Join-Path $TargetAssetsDir $imgFileName
+            try {
+              $bytes = [Convert]::FromBase64String($dataNode.InnerText.Trim())
+              [System.IO.File]::WriteAllBytes($imgPath, $bytes)
+
+              $relPath = if ($TargetFolder -and (Test-Path -LiteralPath $TargetFolder)) {
+                $fromUri = [System.Uri]((Resolve-Path -LiteralPath $TargetFolder).Path + "\")
+                $toUri = [System.Uri]$imgPath
+                [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString())
+              } else {
+                "../../Assets/$imgFileName"
+              }
+              $outlineLines.Add("![image]($relPath)")
+
+              $vaultAssetRel = "OneNote/Assets/$imgFileName"
+              $canvasNodes.Add([ordered]@{
+                id = (New-HexId)
+                type = "file"
+                file = $vaultAssetRel
+                x = [int][Math]::Round($item.x)
+                y = [int][Math]::Round($item.y)
+                width = [int][Math]::Max(100, [Math]::Round($item.w))
+                height = [int][Math]::Max(100, [Math]::Round($item.h))
+              })
+            } catch {}
           }
         }
       }
 
-      $imgNode = $oe.SelectSingleNode("one:Image", $NsManager)
-      if ($imgNode) {
-        $imgIndex++
-        $dataNode = $imgNode.SelectSingleNode("one:Data", $NsManager)
-        if ($dataNode -and -not [string]::IsNullOrWhiteSpace($dataNode.InnerText)) {
-          $ext = if ($imgNode.format) { $imgNode.format.ToLower() } else { "png" }
-          if ($ext -eq "emf") { $ext = "png" }
-          $imgFileName = "${BaseFileName}_image_$($imgIndex.ToString('0000')).$ext"
-          $imgPath = Join-Path $TargetAssetsDir $imgFileName
-          try {
-            $bytes = [Convert]::FromBase64String($dataNode.InnerText.Trim())
-            [System.IO.File]::WriteAllBytes($imgPath, $bytes)
-            
-            $relPath = if ($TargetFolder -and (Test-Path -LiteralPath $TargetFolder)) {
-              $fromUri = [System.Uri]((Resolve-Path -LiteralPath $TargetFolder).Path + "\")
-              $toUri = [System.Uri]$imgPath
-              [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString())
-            } else {
-              "../../Assets/$imgFileName"
-            }
-            $lines.Add("![image]($relPath)")
-          } catch {}
+      $outlineText = ($outlineLines -join "`r`n").Trim()
+      if ($outlineText) {
+        $lines.Add($outlineText)
+        $lines.Add("")
+
+        $textWithoutImages = ($outlineText -replace '!\[.*?\]\(.*?\)', '').Trim()
+        if ($textWithoutImages) {
+          $canvasNodes.Add([ordered]@{
+            id = (New-HexId)
+            type = "text"
+            x = [int][Math]::Round($item.x)
+            y = [int][Math]::Round($item.y)
+            width = [int][Math]::Max(150, [Math]::Round($item.w))
+            height = [int][Math]::Max(50, [Math]::Round($item.h))
+            text = $outlineText
+          })
         }
       }
     }
-    $lines.Add("")
+  }
+
+  if ($hasSpatial -and $canvasFilePath -and $canvasNodes.Count -gt 1) {
+    $canvasObj = [ordered]@{
+      nodes = $canvasNodes
+      edges = $canvasEdges
+    }
+    $canvasJson = $canvasObj | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($canvasFilePath, $canvasJson, [System.Text.UTF8Encoding]::new($false))
   }
 
   return ($lines -join "`r`n").Trim() + "`r`n"
@@ -370,6 +490,10 @@ foreach ($item in $toSync) {
         $oldFull = Join-Path $output $oldRel
         if (Test-Path -LiteralPath $oldFull) {
           Remove-Item -LiteralPath $oldFull -Force
+        }
+        $oldCanvas = [System.IO.Path]::ChangeExtension($oldFull, ".canvas")
+        if (Test-Path -LiteralPath $oldCanvas) {
+          Remove-Item -LiteralPath $oldCanvas -Force
         }
       }
     }

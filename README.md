@@ -10,7 +10,9 @@ Unlike external binary converters or exporters, this solution interacts directly
 - **No Third-Party Binaries**: Works without standalone `.exe` tools, avoiding blocks by Windows Smart App Control, AppLocker, or Device Guard.
 - **Fast Incremental Sync**: Evaluates page hierarchy and modification timestamps in under 1 second. Only new or modified pages are processed.
 - **Accurate Markdown Conversion**: Converts outlines, multi-level lists, Markdown tables, and embedded images.
-- **Handwriting & Ink Support**: Extracts OneNote recognized handwriting text (`recognizedText`) making stylus notes searchable, and renders `InkDrawing` sketches/equations to PNG.
+- **Handwriting & Ink Support**: Extracts OneNote recognized handwriting text (`recognizedText`) making stylus notes searchable, and renders grouped `InkDrawing` sketches/equations into coherent PNG illustrations.
+- **2D Bounding-Box Stroke Clustering**: Groups contiguous pen strokes into unified drawings while strictly preserving boundaries when images or text outlines lie in between.
+- **Obsidian Canvas Support**: Automatically creates `.canvas` whiteboard files for spatial pages, maintaining true $X/Y$ coordinates for notes, images, and drawings.
 - **Page Hierarchy & Subpages**: Subpages (`pageLevel > 1`) are automatically organized into subfolders named after their parent page.
 - **Dynamic Asset Paths**: Automatically calculates relative image links depending on folder nesting depth, ensuring images render properly in Obsidian.
 - **Obsidian Integration**: Trigger synchronization directly via the Obsidian command palette (`Ctrl + P`).

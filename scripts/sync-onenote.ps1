@@ -6,6 +6,7 @@ param(
   [switch]$List,
   [switch]$CleanDuplicates,
   [switch]$WithCanvas,
+  [switch]$SkipCanvas,
   [switch]$SkipInkImages
 )
 
@@ -290,6 +291,62 @@ function Convert-PageXmlToMarkdown {
 
   $sortedElements = $childElements | Sort-Object y, x
 
+  # Performante Gruppierung von InkDrawings via Bounding-Box / Distanz-Cluster:
+  # Zeichnungen werden nur dann gebündelt, wenn kein Image/Outline dazwischen liegt.
+  $groupedElements = [System.Collections.Generic.List[PSCustomObject]]::new()
+  $currInkGroup = $null
+
+  foreach ($elemItem in $sortedElements) {
+    if ($elemItem.Tag -eq "InkDrawing") {
+      if ($null -eq $currInkGroup) {
+        $currInkGroup = [PSCustomObject]@{
+          Tag = "InkGroup"
+          Items = [System.Collections.Generic.List[PSCustomObject]]::new()
+          minX = $elemItem.x
+          minY = $elemItem.y
+          maxX = $elemItem.x + $elemItem.w
+          maxY = $elemItem.y + $elemItem.h
+        }
+        $currInkGroup.Items.Add($elemItem)
+      } else {
+        # Prüfen ob dieser Strich räumlich nah an der aktuellen Gruppe liegt (Distanzschwelle 100pt vertikal / 250pt horizontal)
+        $closeY = ($elemItem.y - $currInkGroup.maxY) -le 100.0
+        $closeX = ($elemItem.x - $currInkGroup.maxX) -le 250.0 -and ($currInkGroup.minX - ($elemItem.x + $elemItem.w)) -le 250.0
+
+        if ($closeY -and $closeX) {
+          $currInkGroup.Items.Add($elemItem)
+          $currInkGroup.minX = [Math]::Min($currInkGroup.minX, $elemItem.x)
+          $currInkGroup.minY = [Math]::Min($currInkGroup.minY, $elemItem.y)
+          $currInkGroup.maxX = [Math]::Max($currInkGroup.maxX, $elemItem.x + $elemItem.w)
+          $currInkGroup.maxY = [Math]::Max($currInkGroup.maxY, $elemItem.y + $elemItem.h)
+        } else {
+          $groupedElements.Add($currInkGroup)
+          $currInkGroup = [PSCustomObject]@{
+            Tag = "InkGroup"
+            Items = [System.Collections.Generic.List[PSCustomObject]]::new()
+            minX = $elemItem.x
+            minY = $elemItem.y
+            maxX = $elemItem.x + $elemItem.w
+            maxY = $elemItem.y + $elemItem.h
+          }
+          $currInkGroup.Items.Add($elemItem)
+        }
+      }
+    } else {
+      # Sobald ein anderes Element (Image, Outline, etc.) kommt, wird die vorherige Ink-Gruppe abgeschlossen.
+      # Dadurch wird garantiert verhindert, dass Zeichnungen über Bilder oder Texte hinweg verschmelzen!
+      if ($null -ne $currInkGroup) {
+        $groupedElements.Add($currInkGroup)
+        $currInkGroup = $null
+      }
+      $groupedElements.Add($elemItem)
+    }
+  }
+  if ($null -ne $currInkGroup) {
+    $groupedElements.Add($currInkGroup)
+    $currInkGroup = $null
+  }
+
   $imgIndex = 0
   $hasSpatial = ($childElements.Count -gt 1)
 
@@ -304,11 +361,11 @@ function Convert-PageXmlToMarkdown {
   $lines.Add($metaLine)
   $lines.Add("")
 
-  foreach ($item in $sortedElements) {
-    $elem = $item.Node
+  foreach ($item in $groupedElements) {
     $tag = $item.Tag
 
     if ($tag -eq "Image") {
+      $elem = $item.Node
       $imgIndex++
       $dataNode = $elem.SelectSingleNode("one:Data", $NsManager)
       if ($dataNode -and -not [string]::IsNullOrWhiteSpace($dataNode.InnerText)) {
@@ -342,42 +399,50 @@ function Convert-PageXmlToMarkdown {
           })
         } catch {}
       }
-    } elseif ($tag -eq "InkDrawing") {
+    } elseif ($tag -eq "InkGroup") {
       if (-not $SkipInkImages) {
         $inkBlobs = [System.Collections.Generic.List[byte[]]]::new()
-        Add-InkBlobsFrom -Scope $elem -NsManager $NsManager -Target $inkBlobs
-        $pngBytes = New-InkStrokesPng -InkBlobs $inkBlobs
-        if ($pngBytes -and $pngBytes.Length -gt 0) {
-          $imgIndex++
-          $imgFileName = "${cleanImgBase}_drawing_$($imgIndex.ToString('0000')).png"
-          $imgPath = Join-Path $TargetAssetsDir $imgFileName
-          try {
-            [System.IO.File]::WriteAllBytes($imgPath, $pngBytes)
+        foreach ($subItem in $item.Items) {
+          Add-InkBlobsFrom -Scope $subItem.Node -NsManager $NsManager -Target $inkBlobs
+        }
 
-            $relPath = if ($TargetFolder -and (Test-Path -LiteralPath $TargetFolder)) {
-              $fromUri = [System.Uri]((Resolve-Path -LiteralPath $TargetFolder).Path + "\")
-              $toUri = [System.Uri]$imgPath
-              [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString())
-            } else {
-              "../../Assets/$imgFileName"
-            }
-            $lines.Add("![drawing]($relPath)")
-            $lines.Add("")
+        if ($inkBlobs.Count -gt 0) {
+          $pngBytes = New-InkStrokesPng -InkBlobs $inkBlobs
+          if ($pngBytes -and $pngBytes.Length -gt 0) {
+            $imgIndex++
+            $imgFileName = "${cleanImgBase}_drawing_$($imgIndex.ToString('0000')).png"
+            $imgPath = Join-Path $TargetAssetsDir $imgFileName
+            try {
+              [System.IO.File]::WriteAllBytes($imgPath, $pngBytes)
 
-            $vaultAssetRel = "OneNote/Assets/$imgFileName"
-            $canvasNodes.Add([ordered]@{
-              id = (New-HexId)
-              type = "file"
-              file = $vaultAssetRel
-              x = [int][Math]::Round($item.x)
-              y = [int][Math]::Round($item.y)
-              width = [int][Math]::Max(100, [Math]::Round($item.w))
-              height = [int][Math]::Max(100, [Math]::Round($item.h))
-            })
-          } catch {}
+              $relPath = if ($TargetFolder -and (Test-Path -LiteralPath $TargetFolder)) {
+                $fromUri = [System.Uri]((Resolve-Path -LiteralPath $TargetFolder).Path + "\")
+                $toUri = [System.Uri]$imgPath
+                [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString())
+              } else {
+                "../../Assets/$imgFileName"
+              }
+              $lines.Add("![drawing]($relPath)")
+              $lines.Add("")
+
+              $vaultAssetRel = "OneNote/Assets/$imgFileName"
+              $groupW = [Math]::Max(50.0, ($item.maxX - $item.minX))
+              $groupH = [Math]::Max(50.0, ($item.maxY - $item.minY))
+              $canvasNodes.Add([ordered]@{
+                id = (New-HexId)
+                type = "file"
+                file = $vaultAssetRel
+                x = [int][Math]::Round($item.minX)
+                y = [int][Math]::Round($item.minY)
+                width = [int][Math]::Max(100, [Math]::Round($groupW))
+                height = [int][Math]::Max(100, [Math]::Round($groupH))
+              })
+            } catch {}
+          }
         }
       }
     } elseif ($tag -eq "Outline") {
+      $elem = $item.Node
       $outlineLines = [System.Collections.Generic.List[string]]::new()
       $tables = $elem.SelectNodes(".//one:Table", $NsManager)
       if ($tables -and $tables.Count -gt 0) {
@@ -676,10 +741,11 @@ foreach ($item in $toSync) {
       New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
     }
 
+    $enableCanvas = (-not $SkipCanvas)
     $mdContent = Convert-PageXmlToMarkdown -PageDoc $pdoc -NsManager $pns `
       -TargetAssetsDir $assetsDir -BaseFileName (Get-SafeFileName $page.name) `
       -NotebookName $nbName -SectionName $secName -TargetFolder $targetFolder `
-      -CreateCanvas:$WithCanvas -SkipInkImages:$SkipInkImages
+      -CreateCanvas:$enableCanvas -SkipInkImages:$SkipInkImages
 
     [System.IO.File]::WriteAllText($item.AbsolutePath, $mdContent, [System.Text.UTF8Encoding]::new($false))
 

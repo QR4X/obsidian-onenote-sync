@@ -27,6 +27,7 @@ The project consists of two components:
    - Extracts embedded base64 images into `OneNote/Assets/` and references them with correct relative Markdown links.
 2. **Obsidian Plugin (`main.js`, `manifest.json`)**:
    - Registers the command `OneNote: Sync Vault` and a ribbon icon.
+   - Provides a dedicated Settings Tab in Obsidian (`Settings -> OneNote Vault Sync`) to toggle Canvas creation, ink image rendering, and configure notebook/section filters.
    - Executes the sync script asynchronously in the background.
    - Shows status notices upon completion.
 

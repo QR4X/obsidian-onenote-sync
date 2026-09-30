@@ -5,7 +5,9 @@ param(
   [switch]$Force,
   [switch]$List,
   [switch]$CleanDuplicates,
-  [switch]$WithCanvas
+  [switch]$WithCanvas,
+  [switch]$SkipCanvas,
+  [switch]$SkipInkImages
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +78,64 @@ function Get-SafeFileName($title) {
   return $safe
 }
 
+function Get-SubPageFolderPrefix {
+  param([string]$SectionKey, [int]$Depth)
+  if (-not $script:sectionCursors.ContainsKey($SectionKey)) {
+    $script:sectionCursors[$SectionKey] = @("", "", "")
+  }
+  $cursors = $script:sectionCursors[$SectionKey]
+  $parts = @()
+  for ($i = 0; $i -lt $Depth; $i++) {
+    if ($i -lt $cursors.Count -and $cursors[$i]) { $parts += $cursors[$i] }
+  }
+  return $parts
+}
+
+function Set-SubPageCursor {
+  param([string]$SectionKey, [int]$Depth, [string]$Name)
+  if (-not $script:sectionCursors.ContainsKey($SectionKey)) {
+    $script:sectionCursors[$SectionKey] = @("", "", "")
+  }
+  $cursors = $script:sectionCursors[$SectionKey]
+  if ($Depth -lt $cursors.Count) {
+    $cursors[$Depth] = $Name
+    for ($i = $Depth + 1; $i -lt $cursors.Count; $i++) { $cursors[$i] = "" }
+  }
+}
+
+$script:sectionCursors = @{}
+
+function Get-PageRelativePath {
+  param($pageNode, [string]$safeTitle)
+  $secNode = $pageNode.SelectSingleNode("ancestor::one:Section", $ns)
+  $sectionKey = if ($secNode) { $secNode.ID } else { "" }
+
+  $depth = 0
+  if ($pageNode.pageLevel) {
+    $parsed = 0
+    if ([int]::TryParse($pageNode.pageLevel, [ref]$parsed) -and $parsed -gt 1) {
+      $depth = [Math]::Min($parsed - 1, 2)
+    }
+  }
+
+  $baseRelFolder = Get-RelativeFolderPath $pageNode
+  $folderParts = [System.Collections.Generic.List[string]]::new()
+  if ($baseRelFolder) { $folderParts.Add($baseRelFolder) }
+
+  foreach ($prefixPart in (Get-SubPageFolderPrefix -SectionKey $sectionKey -Depth $depth)) {
+    $folderParts.Add($prefixPart)
+  }
+
+  Set-SubPageCursor -SectionKey $sectionKey -Depth $depth -Name $safeTitle
+
+  $finalFolder = ($folderParts -join "\")
+  $relFile = if ($finalFolder) { Join-Path $finalFolder "$safeTitle.md" } else { "$safeTitle.md" }
+  return [PSCustomObject]@{
+    RelFolder = $finalFolder
+    RelFilePath = $relFile
+  }
+}
+
 function Clean-HtmlText([string]$html) {
   if ([string]::IsNullOrWhiteSpace($html)) { return "" }
   $s = [System.Net.WebUtility]::HtmlDecode($html)
@@ -94,6 +154,98 @@ function New-HexId {
   return [System.BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
 }
 
+function Get-InkRecognizedText {
+  param($Scope, [System.Xml.XmlNamespaceManager]$NsManager)
+  $sb = [System.Text.StringBuilder]::new()
+
+  $candidates = [System.Collections.Generic.List[object]]::new()
+  if ($Scope.LocalName -eq "InkWord") { $candidates.Add($Scope) }
+  foreach ($w in $Scope.SelectNodes(".//one:InkWord", $NsManager)) { $candidates.Add($w) }
+
+  foreach ($word in $candidates) {
+    $recognized = $word.GetAttribute("recognizedText")
+    if (-not [string]::IsNullOrWhiteSpace($recognized)) {
+      [void]$sb.Append($recognized)
+      continue
+    }
+    if ($word.SelectSingleNode("one:Space", $NsManager)) {
+      [void]$sb.Append(" ")
+    } elseif ($word.SelectSingleNode("one:EndOfLine", $NsManager)) {
+      [void]$sb.Append("`n")
+    }
+  }
+  return $sb.ToString().Trim()
+}
+
+function Add-InkBlobsFrom {
+  param(
+    $Scope,
+    [System.Xml.XmlNamespaceManager]$NsManager,
+    [System.Collections.Generic.List[byte[]]]$Target
+  )
+
+  if ($Scope.LocalName -in @("InkDrawing", "InkWord")) {
+    $selfData = $Scope.SelectSingleNode("one:Data", $NsManager)
+    if ($selfData -and -not [string]::IsNullOrWhiteSpace($selfData.InnerText)) {
+      try { $Target.Add([Convert]::FromBase64String($selfData.InnerText.Trim())) } catch { }
+    }
+  }
+
+  foreach ($node in $Scope.SelectNodes(".//one:InkDrawing | .//one:InkWord", $NsManager)) {
+    $dataNode = $node.SelectSingleNode("one:Data", $NsManager)
+    if (-not $dataNode -or [string]::IsNullOrWhiteSpace($dataNode.InnerText)) { continue }
+    try { $Target.Add([Convert]::FromBase64String($dataNode.InnerText.Trim())) } catch { continue }
+  }
+}
+
+function New-InkStrokesPng {
+  param([System.Collections.Generic.List[byte[]]]$InkBlobs)
+
+  if (-not $InkBlobs -or $InkBlobs.Count -eq 0) { return $null }
+  Add-Type -AssemblyName WindowsBase, PresentationCore, System.Drawing -ErrorAction Stop
+
+  $ink = New-Object System.Windows.Ink.StrokeCollection
+  foreach ($bytes in $InkBlobs) {
+    $ms = New-Object System.IO.MemoryStream -ArgumentList @(,$bytes)
+    try {
+      $part = New-Object System.Windows.Ink.StrokeCollection -ArgumentList @($ms)
+      if ($part.Count -gt 0) { $ink.Add($part) }
+    } catch {
+    } finally { $ms.Dispose() }
+  }
+
+  if ($ink.Count -eq 0) { return $null }
+  $bounds = $ink.GetBounds()
+  if ($bounds.Width -le 0 -or $bounds.Height -le 0) { return $null }
+
+  $margin = 8.0
+  $scale = 2.0
+  $w = [int][Math]::Max(1, [Math]::Ceiling(($bounds.Width + $margin * 2) * $scale))
+  $h = [int][Math]::Max(1, [Math]::Ceiling(($bounds.Height + $margin * 2) * $scale))
+  if ($w -gt 20000 -or $h -gt 20000) { return $null }
+
+  $visual = New-Object System.Windows.Media.DrawingVisual
+  $dc = $visual.RenderOpen()
+  try {
+    $dc.DrawRectangle([System.Windows.Media.Brushes]::Transparent, $null, (New-Object System.Windows.Rect(0, 0, $w, $h)))
+    $dc.PushTransform((New-Object System.Windows.Media.ScaleTransform($scale, $scale)))
+    $dc.PushTransform((New-Object System.Windows.Media.TranslateTransform((-$bounds.Left + $margin), (-$bounds.Top + $margin))))
+    $ink.Draw($dc)
+    $dc.Pop(); $dc.Pop()
+  } finally { $dc.Close() }
+
+  $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+  $rtb.Render($visual)
+
+  $encoder = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+  $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+  $outStream = New-Object System.IO.MemoryStream
+  try {
+    $encoder.Save($outStream)
+    return , $outStream.ToArray()
+  } finally { $outStream.Dispose() }
+}
+
 function Convert-PageXmlToMarkdown {
   param(
     [xml]$PageDoc,
@@ -103,7 +255,8 @@ function Convert-PageXmlToMarkdown {
     [string]$NotebookName,
     [string]$SectionName,
     [string]$TargetFolder,
-    [switch]$CreateCanvas
+    [switch]$CreateCanvas,
+    [switch]$SkipInkImages
   )
 
   $cleanImgBase = ($BaseFileName -replace '\s+', '_')
@@ -118,7 +271,7 @@ function Convert-PageXmlToMarkdown {
   # Alle visuellen Inhaltselemente sammeln
   $childElements = @()
   foreach ($child in $PageDoc.DocumentElement.ChildNodes) {
-    if ($child.LocalName -in @("Outline", "Image", "InsertedFile")) {
+    if ($child.LocalName -in @("Outline", "Image", "InsertedFile", "InkDrawing")) {
       $pos = $child.SelectSingleNode("one:Position", $NsManager)
       $size = $child.SelectSingleNode("one:Size", $NsManager)
       $x = if ($pos -and $pos.x) { [double]$pos.x } else { 0.0 }
@@ -138,6 +291,62 @@ function Convert-PageXmlToMarkdown {
 
   $sortedElements = $childElements | Sort-Object y, x
 
+  # Performante Gruppierung von InkDrawings via Bounding-Box / Distanz-Cluster:
+  # Zeichnungen werden nur dann gebündelt, wenn kein Image/Outline dazwischen liegt.
+  $groupedElements = [System.Collections.Generic.List[PSCustomObject]]::new()
+  $currInkGroup = $null
+
+  foreach ($elemItem in $sortedElements) {
+    if ($elemItem.Tag -eq "InkDrawing") {
+      if ($null -eq $currInkGroup) {
+        $currInkGroup = [PSCustomObject]@{
+          Tag = "InkGroup"
+          Items = [System.Collections.Generic.List[PSCustomObject]]::new()
+          minX = $elemItem.x
+          minY = $elemItem.y
+          maxX = $elemItem.x + $elemItem.w
+          maxY = $elemItem.y + $elemItem.h
+        }
+        $currInkGroup.Items.Add($elemItem)
+      } else {
+        # Prüfen ob dieser Strich räumlich nah an der aktuellen Gruppe liegt (Distanzschwelle 100pt vertikal / 250pt horizontal)
+        $closeY = ($elemItem.y - $currInkGroup.maxY) -le 100.0
+        $closeX = ($elemItem.x - $currInkGroup.maxX) -le 250.0 -and ($currInkGroup.minX - ($elemItem.x + $elemItem.w)) -le 250.0
+
+        if ($closeY -and $closeX) {
+          $currInkGroup.Items.Add($elemItem)
+          $currInkGroup.minX = [Math]::Min($currInkGroup.minX, $elemItem.x)
+          $currInkGroup.minY = [Math]::Min($currInkGroup.minY, $elemItem.y)
+          $currInkGroup.maxX = [Math]::Max($currInkGroup.maxX, $elemItem.x + $elemItem.w)
+          $currInkGroup.maxY = [Math]::Max($currInkGroup.maxY, $elemItem.y + $elemItem.h)
+        } else {
+          $groupedElements.Add($currInkGroup)
+          $currInkGroup = [PSCustomObject]@{
+            Tag = "InkGroup"
+            Items = [System.Collections.Generic.List[PSCustomObject]]::new()
+            minX = $elemItem.x
+            minY = $elemItem.y
+            maxX = $elemItem.x + $elemItem.w
+            maxY = $elemItem.y + $elemItem.h
+          }
+          $currInkGroup.Items.Add($elemItem)
+        }
+      }
+    } else {
+      # Sobald ein anderes Element (Image, Outline, etc.) kommt, wird die vorherige Ink-Gruppe abgeschlossen.
+      # Dadurch wird garantiert verhindert, dass Zeichnungen über Bilder oder Texte hinweg verschmelzen!
+      if ($null -ne $currInkGroup) {
+        $groupedElements.Add($currInkGroup)
+        $currInkGroup = $null
+      }
+      $groupedElements.Add($elemItem)
+    }
+  }
+  if ($null -ne $currInkGroup) {
+    $groupedElements.Add($currInkGroup)
+    $currInkGroup = $null
+  }
+
   $imgIndex = 0
   $hasSpatial = ($childElements.Count -gt 1)
 
@@ -152,11 +361,11 @@ function Convert-PageXmlToMarkdown {
   $lines.Add($metaLine)
   $lines.Add("")
 
-  foreach ($item in $sortedElements) {
-    $elem = $item.Node
+  foreach ($item in $groupedElements) {
     $tag = $item.Tag
 
     if ($tag -eq "Image") {
+      $elem = $item.Node
       $imgIndex++
       $dataNode = $elem.SelectSingleNode("one:Data", $NsManager)
       if ($dataNode -and -not [string]::IsNullOrWhiteSpace($dataNode.InnerText)) {
@@ -190,7 +399,50 @@ function Convert-PageXmlToMarkdown {
           })
         } catch {}
       }
+    } elseif ($tag -eq "InkGroup") {
+      if (-not $SkipInkImages) {
+        $inkBlobs = [System.Collections.Generic.List[byte[]]]::new()
+        foreach ($subItem in $item.Items) {
+          Add-InkBlobsFrom -Scope $subItem.Node -NsManager $NsManager -Target $inkBlobs
+        }
+
+        if ($inkBlobs.Count -gt 0) {
+          $pngBytes = New-InkStrokesPng -InkBlobs $inkBlobs
+          if ($pngBytes -and $pngBytes.Length -gt 0) {
+            $imgIndex++
+            $imgFileName = "${cleanImgBase}_drawing_$($imgIndex.ToString('0000')).png"
+            $imgPath = Join-Path $TargetAssetsDir $imgFileName
+            try {
+              [System.IO.File]::WriteAllBytes($imgPath, $pngBytes)
+
+              $relPath = if ($TargetFolder -and (Test-Path -LiteralPath $TargetFolder)) {
+                $fromUri = [System.Uri]((Resolve-Path -LiteralPath $TargetFolder).Path + "\")
+                $toUri = [System.Uri]$imgPath
+                [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString())
+              } else {
+                "../../Assets/$imgFileName"
+              }
+              $lines.Add("![drawing]($relPath)")
+              $lines.Add("")
+
+              $vaultAssetRel = "OneNote/Assets/$imgFileName"
+              $groupW = [Math]::Max(50.0, ($item.maxX - $item.minX))
+              $groupH = [Math]::Max(50.0, ($item.maxY - $item.minY))
+              $canvasNodes.Add([ordered]@{
+                id = (New-HexId)
+                type = "file"
+                file = $vaultAssetRel
+                x = [int][Math]::Round($item.minX)
+                y = [int][Math]::Round($item.minY)
+                width = [int][Math]::Max(100, [Math]::Round($groupW))
+                height = [int][Math]::Max(100, [Math]::Round($groupH))
+              })
+            } catch {}
+          }
+        }
+      }
     } elseif ($tag -eq "Outline") {
+      $elem = $item.Node
       $outlineLines = [System.Collections.Generic.List[string]]::new()
       $tables = $elem.SelectNodes(".//one:Table", $NsManager)
       if ($tables -and $tables.Count -gt 0) {
@@ -246,6 +498,15 @@ function Convert-PageXmlToMarkdown {
             } else {
               $outlineLines.Add("$indent$text")
             }
+          }
+        }
+
+        $inkText = Get-InkRecognizedText -Scope $oe -NsManager $NsManager
+        if ($inkText) {
+          if ($prefix) {
+            $outlineLines.Add("$indent$prefix$inkText")
+          } else {
+            $outlineLines.Add("$indent$inkText")
           }
         }
 
@@ -354,14 +615,13 @@ foreach ($page in $allPageNodes) {
 
 if ($List) {
   $listItems = foreach ($page in $filteredPages) {
-    $rel = Get-RelativeFolderPath $page
     $safe = Get-SafeFileName $page.name
-    $filePath = Join-Path $rel "$safe.md"
-    $fullPath = Join-Path $output $filePath
+    $pathInfo = Get-PageRelativePath -pageNode $page -safeTitle $safe
+    $fullPath = Join-Path $output $pathInfo.RelFilePath
     $status = if (-not (Test-Path -LiteralPath $fullPath)) { "Neu" } else { "Vorhanden" }
     [PSCustomObject]@{
       Titel = $page.name
-      Abschnitt = $rel
+      Abschnitt = $pathInfo.RelFolder
       Geaendert = $page.lastModifiedTime
       Status = $status
     }
@@ -400,12 +660,14 @@ foreach ($k in $toPrune) {
   $manifest.Remove($k)
 }
 
+$script:sectionCursors = @{}
 $toSync = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 foreach ($page in $filteredPages) {
-  $relFolder = Get-RelativeFolderPath $page
   $safeTitle = Get-SafeFileName $page.name
-  $relFilePath = Join-Path $relFolder "$safeTitle.md"
+  $pathInfo = Get-PageRelativePath -pageNode $page -safeTitle $safeTitle
+  $relFolder = $pathInfo.RelFolder
+  $relFilePath = $pathInfo.RelFilePath
   $absoluteFilePath = Join-Path $output $relFilePath
   $pageMod = [datetime]$page.lastModifiedTime
 
@@ -479,10 +741,11 @@ foreach ($item in $toSync) {
       New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
     }
 
+    $enableCanvas = (-not $SkipCanvas)
     $mdContent = Convert-PageXmlToMarkdown -PageDoc $pdoc -NsManager $pns `
       -TargetAssetsDir $assetsDir -BaseFileName (Get-SafeFileName $page.name) `
       -NotebookName $nbName -SectionName $secName -TargetFolder $targetFolder `
-      -CreateCanvas:$WithCanvas
+      -CreateCanvas:$enableCanvas -SkipInkImages:$SkipInkImages
 
     [System.IO.File]::WriteAllText($item.AbsolutePath, $mdContent, [System.Text.UTF8Encoding]::new($false))
 

@@ -35,7 +35,7 @@ New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
 try {
   $oneNote = New-Object -ComObject OneNote.Application
 } catch {
-  throw "Die Microsoft OneNote-Desktopanwendung konnte nicht angesprochen werden. Bitte stelle sicher, dass OneNote geöffnet oder installiert ist."
+  throw "Failed to connect to Microsoft OneNote desktop application. Please ensure OneNote is installed and running."
 }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -43,11 +43,11 @@ $hierarchyXml = ""
 try {
   $oneNote.GetHierarchy("", 4, [ref]$hierarchyXml)
 } catch {
-  throw "Fehler beim Abrufen der OneNote-Hierarchie: $($_.Exception.Message)"
+  throw "Error retrieving OneNote hierarchy: $($_.Exception.Message)"
 }
 
 if ([string]::IsNullOrWhiteSpace($hierarchyXml)) {
-  throw "OneNote hat eine leere Hierarchie zurückgegeben."
+  throw "OneNote returned an empty hierarchy."
 }
 
 [xml]$hierarchyDoc = $hierarchyXml
@@ -309,7 +309,7 @@ function Convert-PageXmlToMarkdown {
         }
         $currInkGroup.Items.Add($elemItem)
       } else {
-        # Prüfen ob dieser Strich räumlich nah an der aktuellen Gruppe liegt (Distanzschwelle 100pt vertikal / 250pt horizontal)
+        # Check if stroke is spatially close to current group (threshold: 100pt vertical / 250pt horizontal)
         $closeY = ($elemItem.y - $currInkGroup.maxY) -le 100.0
         $closeX = ($elemItem.x - $currInkGroup.maxX) -le 250.0 -and ($currInkGroup.minX - ($elemItem.x + $elemItem.w)) -le 250.0
 
@@ -333,8 +333,8 @@ function Convert-PageXmlToMarkdown {
         }
       }
     } else {
-      # Sobald ein anderes Element (Image, Outline, etc.) kommt, wird die vorherige Ink-Gruppe abgeschlossen.
-      # Dadurch wird garantiert verhindert, dass Zeichnungen über Bilder oder Texte hinweg verschmelzen!
+      # Once an intervening element (Image, Outline, etc.) arrives, finalize the current ink group.
+      # This strictly prevents ink strokes from merging across images or text blocks.
       if ($null -ne $currInkGroup) {
         $groupedElements.Add($currInkGroup)
         $currInkGroup = $null
@@ -353,10 +353,10 @@ function Convert-PageXmlToMarkdown {
   $canvasFileName = "$BaseFileName.canvas"
   $canvasFilePath = if ($TargetFolder) { Join-Path $TargetFolder $canvasFileName } else { "" }
 
-  $lines.Add("> [!info] Importierter OneNote-Inhalt")
-  $metaLine = "> Notizbuch: $NotebookName | Abschnitt: $SectionName"
+  $lines.Add("> [!info] Imported OneNote Content")
+  $metaLine = "> Notebook: $NotebookName | Section: $SectionName"
   if ($CreateCanvas -and $hasSpatial) {
-    $metaLine += " | Canvas-Ansicht: [[$canvasFileName]]"
+    $metaLine += " | Canvas View: [[$canvasFileName]]"
   }
   $lines.Add($metaLine)
   $lines.Add("")
@@ -618,11 +618,11 @@ if ($List) {
     $safe = Get-SafeFileName $page.name
     $pathInfo = Get-PageRelativePath -pageNode $page -safeTitle $safe
     $fullPath = Join-Path $output $pathInfo.RelFilePath
-    $status = if (-not (Test-Path -LiteralPath $fullPath)) { "Neu" } else { "Vorhanden" }
+    $status = if (-not (Test-Path -LiteralPath $fullPath)) { "New" } else { "Existing" }
     [PSCustomObject]@{
-      Titel = $page.name
-      Abschnitt = $pathInfo.RelFolder
-      Geaendert = $page.lastModifiedTime
+      Title = $page.name
+      Section = $pathInfo.RelFolder
+      Modified = $page.lastModifiedTime
       Status = $status
     }
   }
@@ -631,7 +631,7 @@ if ($List) {
 }
 
 if ($CleanDuplicates) {
-  Write-Host "Pruefe auf alte Exporter-Duplikate (* (1).md, etc.)..."
+  Write-Host "Checking for legacy exporter duplicates (* (1).md, etc.)..."
   $duplicateFiles = Get-ChildItem -LiteralPath $output -Recurse -Filter '* (*).md' -File
   $removedDups = 0
   foreach ($f in $duplicateFiles) {
@@ -642,7 +642,7 @@ if ($CleanDuplicates) {
       $removedDups++
     }
   }
-  Write-Host "Bereinigung abgeschlossen: $removedDups Duplikat-Datei(en) entfernt."
+  Write-Host "Cleanup completed: $removedDups duplicate file(s) removed."
 }
 
 # Manifest auf existierende OneNote-Seiten bereinigen
@@ -714,16 +714,16 @@ if ($toSync.Count -eq 0) {
 
   $sw.Stop()
   $sec = [Math]::Round($sw.Elapsed.TotalSeconds, 2)
-  Write-Host "OneNote ist aktuell. Keine Aenderungen gefunden ($($filteredPages.Count) Seiten in $($sec)s geprueft)."
+  Write-Host "OneNote is up to date. No changes found ($($filteredPages.Count) pages checked in $($sec)s)."
   exit 0
 }
 
-Write-Host "OneNote: $($toSync.Count) von $($filteredPages.Count) Seite(n) haben Neuerungen. Synchronisiere..."
+Write-Host "OneNote: $($toSync.Count) of $($filteredPages.Count) page(s) have updates. Synchronizing..."
 
 $successCount = 0
 foreach ($item in $toSync) {
   $page = $item.Page
-  Write-Host "  -> Importiere: $($page.name)"
+  Write-Host "  -> Importing: $($page.name)"
   try {
     $pxml = ""
     $oneNote.GetPageContent($page.ID, [ref]$pxml, 7)
@@ -749,7 +749,7 @@ foreach ($item in $toSync) {
 
     [System.IO.File]::WriteAllText($item.AbsolutePath, $mdContent, [System.Text.UTF8Encoding]::new($false))
 
-    # Falls die Seite zuvor an einem anderen Pfad lag (umbenannt/verschoben), alte Datei loeschen
+    # If the page was previously at a different path (renamed/moved), remove old file
     if ($manifest.Contains($page.ID)) {
       $oldRel = $manifest[$page.ID].path
       if ($oldRel -and $oldRel -ne $item.RelPath) {
@@ -771,7 +771,7 @@ foreach ($item in $toSync) {
     }
     $successCount++
   } catch {
-    Write-Warning "Fehler beim Importieren von $($page.name): $($_.Exception.Message)"
+    Write-Warning "Error importing $($page.name): $($_.Exception.Message)"
   }
 }
 
@@ -785,5 +785,5 @@ $manifestJson = $manifestData | ConvertTo-Json -Depth 5
 
 $sw.Stop()
 $sec = [Math]::Round($sw.Elapsed.TotalSeconds, 2)
-Write-Host "Fertig: $successCount Seite(n) erfolgreich synchronisiert (Dauer: $($sec)s)."
+Write-Host "Done: $successCount page(s) successfully synchronized (Duration: $($sec)s)."
 exit 0

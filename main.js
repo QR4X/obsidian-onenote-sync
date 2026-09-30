@@ -5,13 +5,13 @@ const fs = require("fs");
 
 module.exports = class OneNoteVaultSyncPlugin extends Plugin {
   async onload() {
-    this.addRibbonIcon("refresh-cw", "OneNote: Vault synchronisieren", () => {
+    this.addRibbonIcon("refresh-cw", "OneNote: Sync Vault", () => {
       this.syncVault();
     });
 
     this.addCommand({
       id: "sync-vault",
-      name: "OneNote: Vault synchronisieren",
+      name: "OneNote: Sync Vault",
       callback: () => this.syncVault(),
     });
   }
@@ -37,11 +37,11 @@ module.exports = class OneNoteVaultSyncPlugin extends Plugin {
     const scriptPath = this.getScriptPath(vaultPath);
 
     if (!fs.existsSync(scriptPath)) {
-      new Notice(`OneNote-Sync-Skript nicht gefunden: ${scriptPath}`, 10000);
+      new Notice(`OneNote sync script not found: ${scriptPath}`, 10000);
       return;
     }
 
-    new Notice("OneNote: Suche nach Änderungen …", 3000);
+    new Notice("OneNote: Checking for changes...", 3000);
     const process = spawn("cmd.exe", ["/c", scriptPath], {
       cwd: vaultPath,
       windowsHide: true,
@@ -59,17 +59,17 @@ module.exports = class OneNoteVaultSyncPlugin extends Plugin {
     });
 
     process.on("error", (error) => {
-      new Notice(`OneNote-Synchronisierung konnte nicht gestartet werden: ${error.message}`, 10000);
+      new Notice(`OneNote sync could not be started: ${error.message}`, 10000);
     });
 
     process.on("close", (code) => {
       if (code === 0) {
         const lines = output.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        const lastLine = lines.length > 0 ? lines[lines.length - 1] : "OneNote ist aktuell.";
+        const lastLine = lines.length > 0 ? lines[lines.length - 1] : "OneNote is up to date.";
         new Notice(lastLine, 6000);
       } else {
         const detail = (errorOutput.trim() || output.trim());
-        new Notice(`OneNote-Synchronisierung fehlgeschlagen (${code ?? "unbekannt"}).${detail ? ` ${detail}` : ""}`, 10000);
+        new Notice(`OneNote sync failed (${code ?? "unknown"}).${detail ? ` ${detail}` : ""}`, 10000);
       }
     });
   }

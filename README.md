@@ -26,7 +26,7 @@ The project consists of two components:
    - Exports pages into `OneNote/<Notebook>/<Section>/<Page>.md`.
    - Extracts embedded base64 images into `OneNote/Assets/` and references them with correct relative Markdown links.
 2. **Obsidian Plugin (`main.js`, `manifest.json`)**:
-   - Registers the command `OneNote: Vault synchronisieren`.
+   - Registers the command `OneNote: Sync Vault` and a ribbon icon.
    - Executes the sync script asynchronously in the background.
    - Shows status notices upon completion.
 
@@ -39,10 +39,10 @@ The project consists of two components:
 ## Installation
 
 ### Option 1: As an Obsidian Plugin
-1. Create a folder named `obsidian-onenote-sync` inside your vault's `.obsidian/plugins/` directory.
+1. Create a folder named `onenote-vault-sync` inside your vault's `.obsidian/plugins/` directory.
 2. Copy `manifest.json`, `main.js`, and the `scripts/` folder into that directory.
 3. Reload Obsidian and enable **OneNote Vault Sync** under Community Plugins.
-4. Press `Ctrl + P` and execute `OneNote: Vault synchronisieren`.
+4. Click the OneNote ribbon icon in the sidebar or press `Ctrl + P` and execute `OneNote: Sync Vault`.
 
 ### Option 2: Standalone / CLI
 Run the script from PowerShell or Command Prompt:

@@ -5,6 +5,10 @@ const fs = require("fs");
 
 module.exports = class OneNoteVaultSyncPlugin extends Plugin {
   async onload() {
+    this.addRibbonIcon("refresh-cw", "OneNote: Vault synchronisieren", () => {
+      this.syncVault();
+    });
+
     this.addCommand({
       id: "sync-vault",
       name: "OneNote: Vault synchronisieren",
